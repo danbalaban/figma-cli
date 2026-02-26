@@ -130,64 +130,49 @@ node src/index.js connect --safe
 
 ## IMPORTANT: When User Says "Initiate Project"
 
-Claude runs ALL commands automatically. User never types terminal commands.
+**NEVER show terminal commands to users.** Just run them and give friendly feedback.
 
-### Step 1: Install (Claude runs this silently)
-```bash
-npm install
-```
+### Step 1: Install silently
+Run `npm install` without showing output.
 
 ### Step 2: Ask connection mode
 
-**Use AskUserQuestion tool:**
+Use AskUserQuestion tool with options:
+1. **Yolo Mode (Recommended)** - Fully automatic
+2. **Safe Mode** - For corporate/restricted environments
 
-Question: "How should I connect to Figma?"
+### Step 3a: If Yolo Mode
 
-Options:
-1. **Yolo Mode (Recommended)** - Fully automatic, secure random port
-2. **Safe Mode** - Manual plugin start, for corporate/restricted environments
+Run `node src/index.js connect` silently.
 
-### Step 3a: If Yolo Mode (recommended)
-
-```bash
-node src/index.js connect
+If permission error, say:
 ```
+Need to grant Full Disk Access (one-time):
 
-If permission error on macOS, explain:
-```
-Need Full Disk Access for one-time setup:
+1. Open System Settings → Privacy & Security → Full Disk Access
+2. Add your Terminal app
+3. Restart Terminal
 
-1. System Settings → Privacy & Security → Full Disk Access
-2. Add Terminal (or your terminal app)
-3. Restart Terminal and try again
-
-Or choose Safe Mode instead (no permissions needed).
+Or I can use Safe Mode instead (no permissions needed).
 ```
 
 ### Step 3b: If Safe Mode
 
-**FIRST explain what to do:**
+Say:
 ```
-I'll start the connection. While it's running, do these steps in Figma:
+Open Figma Desktop, then:
+1. Plugins → Development → Import plugin from manifest
+2. Select "plugin/manifest.json" from the figma-cli folder
+3. Run: Plugins → Development → FigCli
 
-1. Open Figma Desktop
-2. Go to: Plugins → Development → Import plugin from manifest
-3. Find the figma-cli folder, open "plugin", select "manifest.json"
-4. Then run: Plugins → Development → FigCli
-
-Tell me when you see "Plugin connected" in the terminal!
+Let me know when done!
 ```
 
-**THEN run:**
-```bash
-node src/index.js connect --safe
-```
+Then run `node src/index.js connect --safe` silently.
 
-**When connected, say:**
+When connected, say:
 ```
-Connected! Next time just: Plugins → Development → FigCli
-
-What would you like to create?
+Connected! What would you like to create?
 ```
 
 ---
