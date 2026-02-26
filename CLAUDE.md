@@ -43,6 +43,12 @@ node src/index.js tokens ds              # IDS Base colors
 - `tokens preset shadcn` = Full shadcn system (primitives + semantic tokens with Light/Dark mode)
 - `tokens tailwind` = Just the Tailwind color palette (primitives only)
 
+"Delete all variables":
+```bash
+node src/index.js var delete-all                    # All collections
+node src/index.js var delete-all -c "primitives"    # Only specific collection
+```
+
 **Note:** `var list` only SHOWS existing variables. Use `tokens` commands to CREATE them.
 
 ---

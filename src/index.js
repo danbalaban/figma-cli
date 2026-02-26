@@ -1318,6 +1318,43 @@ return 'Created ' + created + ' variables';
     console.log(chalk.green(result || `✓ Created ${vars.length} variables`));
   });
 
+variables
+  .command('delete-all')
+  .description('Delete all local variables and collections')
+  .option('-c, --collection <name>', 'Only delete variables in this collection')
+  .action((options) => {
+    checkConnection();
+    const spinner = ora('Deleting variables...').start();
+
+    const filterCode = options.collection
+      ? `cols = cols.filter(c => c.name.includes('${options.collection}'));`
+      : '';
+
+    const code = `(async () => {
+let cols = await figma.variables.getLocalVariableCollectionsAsync();
+${filterCode}
+let deleted = 0;
+for (const col of cols) {
+  const vars = await figma.variables.getLocalVariablesAsync();
+  const colVars = vars.filter(v => v.variableCollectionId === col.id);
+  for (const v of colVars) {
+    v.remove();
+    deleted++;
+  }
+  col.remove();
+}
+return 'Deleted ' + deleted + ' variables and ' + cols.length + ' collections';
+})()`;
+
+    try {
+      const result = figmaEvalSync(code);
+      spinner.succeed(result);
+    } catch (error) {
+      spinner.fail('Failed to delete variables');
+      console.error(chalk.red(error.message));
+    }
+  });
+
 // ============ BATCH OPERATIONS ============
 
 program
