@@ -12,7 +12,7 @@ import { homedir, platform } from 'os';
 import { createServer } from 'http';
 import { FigJamClient } from './figjam-client.js';
 import { FigmaClient } from './figma-client.js';
-import { isPatched, patchFigma, unpatchFigma, getFigmaCommand, generateRandomPort, saveCdpPort, getCdpPort, clearCdpPort } from './figma-patch.js';
+import { isPatched, patchFigma, unpatchFigma, getFigmaCommand, getCdpPort } from './figma-patch.js';
 
 // Daemon configuration
 const DAEMON_PORT = 3456;
@@ -184,10 +184,7 @@ function getFigmaPath() {
 }
 
 function startFigma() {
-  // Generate and save a random port for security (binds to localhost only)
-  const port = generateRandomPort();
-  saveCdpPort(port);
-
+  const port = getCdpPort(); // Fixed port 9222 for figma-use compatibility
   const figmaPath = getFigmaPath();
   if (IS_MAC) {
     execSync(`open -a Figma --args --remote-debugging-port=${port}`, { stdio: 'pipe' });
@@ -1080,6 +1077,244 @@ variables
     figmaUse(`variable find "${pattern}"`);
   });
 
+variables
+  .command('create-batch <json>')
+  .description('Create multiple variables at once (faster than individual calls)')
+  .requiredOption('-c, --collection <id>', 'Collection ID or name')
+  .action((json, options) => {
+    checkConnection();
+    let vars;
+    try {
+      vars = JSON.parse(json);
+    } catch {
+      console.log(chalk.red('Invalid JSON. Expected: [{"name": "color/red", "type": "COLOR", "value": "#ff0000"}, ...]'));
+      return;
+    }
+    if (!Array.isArray(vars)) {
+      console.log(chalk.red('Expected JSON array'));
+      return;
+    }
+
+    const code = `(async () => {
+const vars = ${JSON.stringify(vars)};
+const cols = await figma.variables.getLocalVariableCollectionsAsync();
+let col = cols.find(c => c.id === '${options.collection}' || c.name === '${options.collection}');
+if (!col) return 'Collection not found: ${options.collection}';
+const modeId = col.modes[0].modeId;
+
+function hexToRgb(hex) {
+  const result = /^#?([a-f\\d]{2})([a-f\\d]{2})([a-f\\d]{2})$/i.exec(hex);
+  return result ? { r: parseInt(result[1], 16) / 255, g: parseInt(result[2], 16) / 255, b: parseInt(result[3], 16) / 255 } : null;
+}
+
+let created = 0;
+for (const v of vars) {
+  const type = (v.type || 'COLOR').toUpperCase();
+  const variable = figma.variables.createVariable(v.name, col, type);
+  if (v.value !== undefined) {
+    let figmaValue = v.value;
+    if (type === 'COLOR') figmaValue = hexToRgb(v.value);
+    else if (type === 'FLOAT') figmaValue = parseFloat(v.value);
+    else if (type === 'BOOLEAN') figmaValue = v.value === true || v.value === 'true';
+    variable.setValueForMode(modeId, figmaValue);
+  }
+  created++;
+}
+return 'Created ' + created + ' variables';
+})()`;
+
+    const result = figmaEvalSync(code);
+    console.log(chalk.green(result || `✓ Created ${vars.length} variables`));
+  });
+
+// ============ BATCH OPERATIONS ============
+
+program
+  .command('delete-batch <nodeIds>')
+  .description('Delete multiple nodes at once (comma-separated IDs or JSON array)')
+  .action((nodeIds) => {
+    checkConnection();
+    let ids;
+    try {
+      ids = JSON.parse(nodeIds);
+    } catch {
+      ids = nodeIds.split(',').map(s => s.trim());
+    }
+
+    const code = `(async () => {
+const ids = ${JSON.stringify(ids)};
+let deleted = 0;
+for (const id of ids) {
+  const node = await figma.getNodeByIdAsync(id);
+  if (node) {
+    node.remove();
+    deleted++;
+  }
+}
+return 'Deleted ' + deleted + ' nodes';
+})()`;
+
+    const result = figmaEvalSync(code);
+    console.log(chalk.green(result || `✓ Deleted nodes`));
+  });
+
+program
+  .command('bind-batch <json>')
+  .description('Bind variables to multiple nodes at once')
+  .action((json) => {
+    checkConnection();
+    let bindings;
+    try {
+      bindings = JSON.parse(json);
+    } catch {
+      console.log(chalk.red('Invalid JSON. Expected: [{"nodeId": "1:234", "property": "fill", "variable": "primary/500"}, ...]'));
+      return;
+    }
+
+    const code = `(async () => {
+const bindings = ${JSON.stringify(bindings)};
+const vars = await figma.variables.getLocalVariablesAsync();
+let bound = 0;
+
+for (const b of bindings) {
+  const node = await figma.getNodeByIdAsync(b.nodeId);
+  if (!node) continue;
+
+  const variable = vars.find(v => v.name === b.variable || v.name.endsWith('/' + b.variable));
+  if (!variable) continue;
+
+  const prop = b.property.toLowerCase();
+
+  if (prop === 'fill' && 'fills' in node && node.fills.length > 0) {
+    const newFill = figma.variables.setBoundVariableForPaint(node.fills[0], 'color', variable);
+    node.fills = [newFill];
+    bound++;
+  } else if (prop === 'stroke' && 'strokes' in node && node.strokes.length > 0) {
+    const newStroke = figma.variables.setBoundVariableForPaint(node.strokes[0], 'color', variable);
+    node.strokes = [newStroke];
+    bound++;
+  } else if (prop === 'radius' && 'cornerRadius' in node) {
+    node.setBoundVariable('cornerRadius', variable);
+    bound++;
+  } else if (prop === 'gap' && 'itemSpacing' in node) {
+    node.setBoundVariable('itemSpacing', variable);
+    bound++;
+  } else if (prop === 'padding' && 'paddingTop' in node) {
+    node.setBoundVariable('paddingTop', variable);
+    node.setBoundVariable('paddingBottom', variable);
+    node.setBoundVariable('paddingLeft', variable);
+    node.setBoundVariable('paddingRight', variable);
+    bound++;
+  }
+}
+return 'Bound ' + bound + ' properties';
+})()`;
+
+    const result = figmaEvalSync(code);
+    console.log(chalk.green(result || `✓ Bound variables`));
+  });
+
+program
+  .command('set-batch <json>')
+  .description('Set properties on multiple nodes at once')
+  .action((json) => {
+    checkConnection();
+    let operations;
+    try {
+      operations = JSON.parse(json);
+    } catch {
+      console.log(chalk.red('Invalid JSON. Expected: [{"nodeId": "1:234", "fill": "#ff0000", "radius": 8}, ...]'));
+      return;
+    }
+
+    const code = `(async () => {
+const operations = ${JSON.stringify(operations)};
+let updated = 0;
+
+function hexToRgb(hex) {
+  const result = /^#?([a-f\\d]{2})([a-f\\d]{2})([a-f\\d]{2})$/i.exec(hex);
+  return result ? { r: parseInt(result[1], 16) / 255, g: parseInt(result[2], 16) / 255, b: parseInt(result[3], 16) / 255 } : null;
+}
+
+for (const op of operations) {
+  const node = await figma.getNodeByIdAsync(op.nodeId);
+  if (!node) continue;
+
+  if (op.fill && 'fills' in node) {
+    const rgb = hexToRgb(op.fill);
+    if (rgb) node.fills = [{ type: 'SOLID', color: rgb }];
+  }
+  if (op.stroke && 'strokes' in node) {
+    const rgb = hexToRgb(op.stroke);
+    if (rgb) node.strokes = [{ type: 'SOLID', color: rgb }];
+  }
+  if (op.strokeWidth !== undefined && 'strokeWeight' in node) {
+    node.strokeWeight = op.strokeWidth;
+  }
+  if (op.radius !== undefined && 'cornerRadius' in node) {
+    node.cornerRadius = op.radius;
+  }
+  if (op.opacity !== undefined && 'opacity' in node) {
+    node.opacity = op.opacity;
+  }
+  if (op.name && 'name' in node) {
+    node.name = op.name;
+  }
+  if (op.visible !== undefined && 'visible' in node) {
+    node.visible = op.visible;
+  }
+  if (op.x !== undefined) node.x = op.x;
+  if (op.y !== undefined) node.y = op.y;
+  if (op.width !== undefined && op.height !== undefined && 'resize' in node) {
+    node.resize(op.width, op.height);
+  }
+  updated++;
+}
+return 'Updated ' + updated + ' nodes';
+})()`;
+
+    const result = figmaEvalSync(code);
+    console.log(chalk.green(result || `✓ Updated nodes`));
+  });
+
+program
+  .command('rename-batch <json>')
+  .description('Rename multiple nodes at once')
+  .action((json) => {
+    checkConnection();
+    let renames;
+    try {
+      renames = JSON.parse(json);
+    } catch {
+      console.log(chalk.red('Invalid JSON. Expected: [{"nodeId": "1:234", "name": "New Name"}, ...] or {"1:234": "New Name", ...}'));
+      return;
+    }
+
+    // Support both array and object format
+    let pairs;
+    if (Array.isArray(renames)) {
+      pairs = renames.map(r => ({ id: r.nodeId, name: r.name }));
+    } else {
+      pairs = Object.entries(renames).map(([id, name]) => ({ id, name }));
+    }
+
+    const code = `(async () => {
+const pairs = ${JSON.stringify(pairs)};
+let renamed = 0;
+for (const p of pairs) {
+  const node = await figma.getNodeByIdAsync(p.id);
+  if (node) {
+    node.name = p.name;
+    renamed++;
+  }
+}
+return 'Renamed ' + renamed + ' nodes';
+})()`;
+
+    const result = figmaEvalSync(code);
+    console.log(chalk.green(result || `✓ Renamed nodes`));
+  });
+
 // ============ DAEMON ============
 
 const daemon = program
@@ -1926,29 +2161,70 @@ create
   .option('-x <n>', 'X position (auto if not set)')
   .option('-y <n>', 'Y position', '0')
   .option('--spacing <n>', 'Gap from other elements', '100')
-  .action((name, options) => {
+  .action(async (name, options) => {
     checkConnection();
+    const spinner = ora(`Fetching icon ${name}...`).start();
 
-    // Use render command with <Icon> JSX (works in both Safe and Yolo mode)
-    const posX = options.x !== undefined ? options.x : getNextFreeX(parseInt(options.spacing) || 100);
-    const posY = parseInt(options.y) || 0;
-
-    const jsx = `<Icon name="${name}" size={${options.size}} color="${options.color}" />`;
-
-    // Use render with explicit position
-    const cmd = `npx figma-use render --stdin --json --x ${posX} --y ${posY}`;
     try {
-      const output = execSync(cmd, {
-        input: jsx,
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 30000
-      });
-      const result = JSON.parse(output);
-      console.log(chalk.green('✓ Created icon: ') + name);
-      console.log(chalk.gray(`  Position: (${posX}, ${posY}), Size: ${options.size}px`));
+      // Parse icon name (prefix:name format)
+      const [prefix, iconName] = name.includes(':') ? name.split(':') : ['lucide', name];
+
+      // Fetch SVG from Iconify API
+      const size = parseInt(options.size) || 24;
+      const color = options.color || '#000000';
+      const url = `https://api.iconify.design/${prefix}/${iconName}.svg?width=${size}&height=${size}&color=${encodeURIComponent(color)}`;
+
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Icon not found: ${name}`);
+      }
+      const svgContent = await response.text();
+
+      if (!svgContent.includes('<svg')) {
+        throw new Error(`Invalid icon: ${name}`);
+      }
+
+      spinner.text = 'Creating in Figma...';
+
+      // Create SVG in Figma via daemon
+      const posX = options.x !== undefined ? parseInt(options.x) : null;
+      const posY = parseInt(options.y) || 0;
+      const spacing = parseInt(options.spacing) || 100;
+
+      const code = `
+(async () => {
+  // Smart positioning
+  let x = ${posX};
+  if (x === null) {
+    x = 0;
+    figma.currentPage.children.forEach(n => {
+      x = Math.max(x, n.x + (n.width || 0));
+    });
+    x += ${spacing};
+  }
+
+  // Create SVG node
+  const node = figma.createNodeFromSvg(${JSON.stringify(svgContent)});
+  node.name = "${name}";
+  node.x = x;
+  node.y = ${posY};
+
+  // Flatten to vector for cleaner result
+  if (node.type === 'FRAME' && node.children.length > 0) {
+    const flattened = figma.flatten([node]);
+    flattened.name = "${name}";
+    return { id: flattened.id, x: flattened.x, y: flattened.y, width: flattened.width, height: flattened.height };
+  }
+
+  return { id: node.id, x: node.x, y: node.y, width: node.width, height: node.height };
+})()`;
+
+      const result = await fastEval(code);
+      spinner.succeed(`Created icon: ${name}`);
+      console.log(chalk.gray(`  Position: (${result.x}, ${result.y}), Size: ${result.width}x${result.height}px`));
     } catch (error) {
-      console.error(chalk.red('Error creating icon:'), error.message);
+      spinner.fail('Error creating icon');
+      console.error(chalk.red(error.message));
     }
   });
 
